@@ -16,7 +16,7 @@ typedef struct arp_entry {
 } arp_entry;
 
 typedef struct list {
-	packet pckt;
+	packet *pckt;
 	uint32_t daddr;
 	struct list *next;
 } list;
@@ -30,7 +30,7 @@ u_char *convert_to_uchar(uint32_t);
 void insert_in_arp_table(arp_entry *, int *, uint32_t, u_char *);
 uint16_t checksum(void *,size_t );
 arp_entry *get_arp_entry(arp_entry *, int, uint32_t );
-void insert_in_list(list **, packet, uint32_t);
+void insert_in_list(list **, packet *, uint32_t);
 
 int main(int argc, char *argv[])
 {	
@@ -46,6 +46,7 @@ int main(int argc, char *argv[])
 
 	while (1) {
 		rc = get_packet(&m);
+		printf("PRIMESC MESAJ NOU");
 		DIE(rc < 0, "get_message");
 		struct in_addr my_addr;
 		inet_aton(get_interface_ip(m.interface), &my_addr);
@@ -81,23 +82,27 @@ int main(int argc, char *argv[])
 				else { // ARP Request is not targeted to me
 					continue; // Drop the packet
 				}
+				continue;
 			}
 			if (ntohs(arp_hdr->ar_op) == ARPOP_REPLY) { // ARP Reply
 				printf("Intru pe arp_reply\n");
 				// Update ARP Table
 				uint32_t source_ip = convert_to_uint32(eth_arp->arp_spa);
 				insert_in_arp_table(arp_table, &arp_table_size, source_ip, eth_arp->arp_sha);
+				printf("Termin de introdus in arptable\n");
 				// TODO Send packets from queue which were waiting for this mac address
 				list *aux = q;
 				list *aux2 = q;
-				printf("Ajung inainte de while\n");
+				printf("Ajung inainte de while cu arp_table size = %d\n", arp_table_size);
 				while (aux != NULL) { // Iterate through the queue
-					if (aux->daddr == source_ip) { // the packet was waiting for this ip
-						packet to_send = aux->pckt;
-						struct ether_header *to_send_eth_hdr = (struct ether_header *)to_send.payload;
+					if (aux->daddr == source_ip) { // the packet was waiting for this ARP Reply
+						printf("Am pachet de trimis\n");
+						packet *to_send = aux->pckt;
+						struct ether_header *to_send_eth_hdr = (struct ether_header *)to_send->payload;
 						memcpy(to_send_eth_hdr->ether_dhost, eth_hdr->ether_shost, 6 * sizeof(u_char));
-						printf("Ajung aici\n");
-						send_packet(to_send.interface, &to_send);
+						get_interface_mac(to_send->interface, to_send_eth_hdr->ether_shost);
+						printf("Trimit pachetul din lista\n");
+						send_packet(to_send->interface, to_send);
 						if (aux == q) {
 							aux = aux->next;
 							aux2 = aux2->next;
@@ -105,11 +110,12 @@ int main(int argc, char *argv[])
 							continue;
 						}
 						else {
-							aux2->next = aux->next;
+							aux->next = aux->next;
 						}
 					}
+					printf("aux = aux next\n");
 					aux = aux->next;
-					if (aux2 == q){
+					if (aux == q->next){
 						continue;
 					}
 					aux2 = aux2->next;
@@ -123,10 +129,11 @@ int main(int argc, char *argv[])
 			// Check the packet is meant to arrive to me
 			if (ip_hdr->daddr == my_addr.s_addr) {
 				// Check if the packet uses ICMP
-				if (ip_hdr->protocol == IPPROTO_ICMP) { 
+				if (ip_hdr->protocol == IPPROTO_ICMP) {
 					struct icmphdr *icmp_hdr = (struct icmphdr *) (m.payload + sizeof(struct ether_header) + sizeof(struct iphdr));	
 					if (checksum(icmp_hdr, sizeof(struct icmphdr)) != 0) {
 						perror("Checksum error\n");
+						continue;
 					}
 					// Check if it's and ICMP Echo
 					if (icmp_hdr->type == 8) { // Then reply with icmp echo reply
@@ -134,6 +141,10 @@ int main(int argc, char *argv[])
 					}
 					icmp_hdr->checksum = 0;
 					icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr)); // recalculate checksum
+					if (ip_hdr->ttl < 1) {
+						// TTL exceeded
+						continue;
+					}
 					ip_hdr->version = 4;
 					ip_hdr->ttl --;
 					ip_hdr->daddr = ip_hdr->saddr; // destination address is the ex source address
@@ -142,7 +153,7 @@ int main(int argc, char *argv[])
 					ip_hdr->check = checksum(ip_hdr, sizeof(struct iphdr)); // recalculate checksum
 					memcpy(&(eth_hdr->ether_dhost), &(eth_hdr->ether_shost), 6 * sizeof(u_char)); // destination mac addr is ex source mac addr
 					get_interface_mac(m.interface, eth_hdr->ether_shost); // my mac address
-					eth_hdr->ether_type = htons(ETHERTYPE_IP); // specify type of ether communication (ARP)
+					eth_hdr->ether_type = htons(ETHERTYPE_IP); // specify type of ether communication (IP)
 					send_packet(m.interface, &m);
 					continue;
 				}
@@ -155,27 +166,83 @@ int main(int argc, char *argv[])
 			// Check the checksum
 			if (checksum(ip_hdr, sizeof(struct iphdr)) != 0) {
 				perror("Checksum error\n");
+				// Drop the packet
+				continue;
 			}
 			// Check TTL >= 1
 			if (ip_hdr->ttl < 1) {
 				perror("TTL error\n");
+				if (ip_hdr->protocol == IPPROTO_ICMP) {// ICMP timeout
+					struct icmphdr *icmp_hdr = (struct icmphdr *) (m.payload + sizeof(struct ether_header) + sizeof(struct iphdr));	
+					memcpy(m.payload + sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr), ip_hdr, sizeof(struct iphdr));
+					m.len = sizeof(struct ether_header) + 2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 64;
+					icmp_hdr->type = ICMP_TIME_EXCEEDED; 
+					icmp_hdr->checksum = 0;
+					icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr)); // recalculate checksum
+					if (ip_hdr->ttl < 1) {
+						// TTL exceeded
+						continue;
+					}
+					// swap dest and source ip
+					uint32_t my_ip_addr = ip_hdr->daddr;
+					ip_hdr->daddr = ip_hdr->saddr;
+					ip_hdr->saddr = my_ip_addr;
+					ip_hdr->ttl = 64;
+					ip_hdr->id = ip_hdr->id + 1;
+					ip_hdr->tot_len = htons(ntohs(ip_hdr->tot_len) + sizeof(struct iphdr) + sizeof(struct icmphdr));
+					ip_hdr->check = 0;
+					ip_hdr->check = checksum(ip_hdr, sizeof(struct iphdr)); // recalculate checksum
+					memcpy(&(eth_hdr->ether_dhost), &(eth_hdr->ether_shost), 6 * sizeof(u_char)); // destination mac addr is ex source mac addr
+					get_interface_mac(m.interface, eth_hdr->ether_shost); // my mac address
+					eth_hdr->ether_type = htons(ETHERTYPE_IP); // specify type of ether communication (IP)
+					send_packet(m.interface, &m);
+				}
+				continue;
 			}
-			printf("Incep cautarea best route\n");
 			rt_entry *next = get_best_route(ip_hdr->daddr, r_table);
-			printf("Termin cautare best route\n"); 
 			if (next == NULL) {
 				perror("Best route not found\n");
+				if (ip_hdr->protocol == IPPROTO_ICMP) {// Host unreachable
+					struct icmphdr *icmp_hdr = (struct icmphdr *) (m.payload + sizeof(struct ether_header) + sizeof(struct iphdr));	
+					memcpy(m.payload + sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr), ip_hdr, sizeof(struct iphdr));
+					m.len = sizeof(struct ether_header) + 2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 64;
+					icmp_hdr->type = ICMP_DEST_UNREACH;
+					icmp_hdr->code = 0;
+					icmp_hdr->checksum = 0;
+					icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr)); // recalculate checksum
+					if (ip_hdr->ttl < 1) {
+						// TTL exceeded
+						continue;
+					}
+					// swap dest and source ip
+					uint32_t my_ip_addr = ip_hdr->daddr;
+					ip_hdr->daddr = ip_hdr->saddr;
+					ip_hdr->saddr = my_ip_addr;
+					ip_hdr->ttl = 64;
+					ip_hdr->id = ip_hdr->id + 1;
+					ip_hdr->protocol = 1;
+					ip_hdr->frag_off = 0;
+					ip_hdr->tot_len = htons(ntohs(ip_hdr->tot_len) + sizeof(struct iphdr) + sizeof(struct icmphdr));
+					ip_hdr->check = 0;
+					ip_hdr->check = checksum(ip_hdr, sizeof(struct iphdr)); // recalculate checksum
+					memcpy(&(eth_hdr->ether_dhost), &(eth_hdr->ether_shost), 6 * sizeof(u_char)); // destination mac addr is ex source mac addr
+					get_interface_mac(m.interface, eth_hdr->ether_shost); // my mac address
+					eth_hdr->ether_type = htons(ETHERTYPE_IP); // specify type of ether communication (IP)
+					send_packet(m.interface, &m);
+				}
+				continue;
 			}
 			// Update TTL and recalculate the checksum */
 			ip_hdr->ttl = ip_hdr->ttl - 1;
 			ip_hdr->check = 0;
 			ip_hdr->check = checksum(ip_hdr, sizeof(struct iphdr));
 			// Find the arp entry of the best route
-			struct arp_entry *dest_arp = get_arp_entry(arp_table, arp_table_size, ip_hdr->daddr);
+			struct arp_entry *dest_arp = get_arp_entry(arp_table, arp_table_size, next->next_hop);
 			if (dest_arp == NULL) {
 				printf("Incep un ARP Request\n");
 				// Enqueue packet and send ARP Request for daddr
-				insert_in_list(&q, m, ip_hdr->daddr);
+				m.interface = next->interface;
+				insert_in_list(&q, &m, ip_hdr->daddr);
 				struct arphdr *req_arp_hdr = (struct arphdr *) malloc( sizeof(struct arphdr));
 				req_arp_hdr->ar_op = htons(ARPOP_REQUEST);
 				req_arp_hdr->ar_hrd = htons(ARPHRD_ETHER);
@@ -184,8 +251,11 @@ int main(int argc, char *argv[])
 				req_arp_hdr->ar_pln = (uint8_t) 4;
 				struct ether_arp *req_eth_arp = (struct ether_arp *) malloc( sizeof(struct ether_arp));
 				req_eth_arp->ea_hdr = *req_arp_hdr;
-				get_interface_mac(m.interface, req_eth_arp->arp_sha); // my mac address
-				memcpy(req_eth_arp->arp_spa, my_ip, 4 * sizeof(u_char)); // my ip address
+				struct in_addr my_interface_addr;
+				inet_aton(get_interface_ip(next->interface), &my_interface_addr);
+				u_char *my_interface_ip = convert_to_uchar(my_addr.s_addr);
+				get_interface_mac(next->interface, req_eth_arp->arp_sha); // my mac address
+				memcpy(req_eth_arp->arp_spa, my_interface_ip, 4 * sizeof(u_char)); // my ip address
 				if (hwaddr_aton("ff:ff:ff:ff:ff:ff", req_eth_arp->arp_tha) == -1) { // set target mac to ff:ff:ff:ff:ff:ff
 					perror("Hwaddr error\n");
 				}
@@ -194,7 +264,7 @@ int main(int argc, char *argv[])
 				if (hwaddr_aton("ff:ff:ff:ff:ff:ff", req_eth_hdr->ether_dhost) == -1) { // set destination mac to ff:ff:ff:ff:ff:ff
 					perror("Hwaddr error\n");
 				}
-				get_interface_mac(m.interface, req_eth_hdr->ether_shost); // my mac address
+				get_interface_mac(next->interface, req_eth_hdr->ether_shost); // my mac address
 				req_eth_hdr->ether_type = htons(ETHERTYPE_ARP); // specify type of ether communication (ARP)
 				packet arp_request;
 				memcpy(arp_request.payload, req_eth_hdr, sizeof(struct ether_header));
@@ -204,7 +274,9 @@ int main(int argc, char *argv[])
 				send_packet(next->interface, &arp_request);
 			}
 			else {
+				printf("TRIMIT DE AICI\n");
 				memcpy(eth_hdr->ether_dhost, dest_arp->mac, 6 * sizeof(u_char));
+				get_interface_mac(m.interface, eth_hdr->ether_shost);
 				// Forward the packet to best_route->interface
 				send_packet(next->interface, &m);
 			}
@@ -422,9 +494,10 @@ arp_entry *get_arp_entry(arp_entry *arp_table, int size, uint32_t daddr) {
 }
 
 
-void insert_in_list(list **q, packet p, uint32_t d) {
+void insert_in_list(list **q, packet *p, uint32_t d) {
 	list *new_node = (list *) malloc(sizeof(list));
-	memcpy(&(new_node->pckt), &p, sizeof(packet));
+	new_node->pckt = (packet *) malloc(sizeof(packet));
+	memcpy(new_node->pckt, p, sizeof(packet));
 	new_node->daddr = d;
 	new_node->next = NULL;
 	if (*q == NULL) {
