@@ -1,0 +1,60 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% TEMA 1 PC %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Student: Careja Alexandru-Cristian
+Grupa: 324 CD
+
+In acest document voi detalia implementarea temei.
+
+Structuri noi definite:
+    <-> rt_entry - folosita pentru a reprezenta o intrare a tabelei de rutare.
+                   Are campurile prefix, masca, next_hop si interfata.
+    <-> arp_entry - folosita pentru a reprezenta o intrare a tabelei ARP. Are
+                    campurile IP si MAC.
+    <-> list - folosita pentru a tine minte intr-o "coada" pachetel ce nu au
+               putut fi trimise deoarece nu cunosteam adresa MAC a destinatiei.
+
+    
+Implementare:
+    <+> Parsarea tabelei de rutare
+Constanta R_TABLE_SIZE are dimensiunea tabelei de rutare din fisierul temei, si
+reprezinta dimensiunea maxima a tabelei de rutare. Tabela de rutare o citesc
+cat timp exista linii in fisierul de intrare "rtable.txt" cu functia getline.
+Impart stringul citit cu strtok si completez campurile structurii rt_entry.
+
+    <+> Cautarea in tabela de rutare
+Pentru a obtine o complexitate mai buna decat O(n) am vrut sa fac binary search.
+Am sortat vectorul de intrari dupa prefix crecator si dupa masca descrescator
+folosind merge sort.
+
+    <+> ARP
+Atunci cand primesc un mesaj, verific daca tipul sau este ARP, daca da, atunci
+verific daca este de tip ARP Reply sau ARP Request. 
+-> Daca este un ARP Request, verific daca imi este destinat mie (destination 
+address = adresa mea ip pe interfata respectiva). Daca nu imi este destinat mie,
+ii dau drop. Daca imi este destinat mie, atunci completez pachetul pentru a face
+un ARP Reply cu adresa mea MAC.
+-> Daca este un ARP Reply, atunci updatez tabela ARP si parcurg coada cu pachete
+in asteptare pentru a trimite pachetele care asteptau pentru acest raspuns ARP.
+
+    <+> IPv4
+Atunci cand primesc un mesaj, verific daca tipul sau este IP, daca da, atunci
+verific daca imi este destinat mie, ca router. Daca da, verific daca este un 
+pachet ICMP echo request. Daca da, atunci modific pachetul si trimit un ICMP 
+echo reply la adresa de unde a venit echo requestul.
+Daca nu este destinat routerului, verific checksum-ul si daca este gresit,
+atunci dau drop pachetului. Verific TTL-ul, iar daca acesta este mai mic decat 
+1, atunci trimit un mesaj de ICMP Timeout la adresa de unde a venit pachetul.
+Daca trece de verificarea checksum si TTL, atunci caut pentru pachet cea mai
+buna ruta de forward in tabela de rutare. Daca nu gaseste o ruta catre ip-ul
+destinatie, atunci trimite la sursa un mesaj de tip ICMP Host Unreachable.
+In schimb, daca gaseste o ruta catre acel IP, cauta in tabela ARP un match.
+Daca il gaseste, atunci trimite pachetul. Daca nu, atunci baga pachetul in coada
+de asteptare si creeaza si trimite un pachet ARP Request cu destinatie Broadcast
+si cu target IP, IP-ul destinatie pentru care nu avem match in tabela ARP.
+
+
+Dificultati:
+    - A trebuit sa imi implementez 2 functii conversie: una de la uint32_t la 
+u_char[4], si una de la u_char[4] la uint32_t. Prima o folosesc ca sa pot compa-
+ra o adresa ip din ether_arp cu o adresa ip a routerului. Pe cea de-a doua o fo-
+losesc ca sa scriu o adresa ip in ether_arp.
