@@ -58,3 +58,4 @@ Dificultati:
 u_char[4], si una de la u_char[4] la uint32_t. Prima o folosesc ca sa pot compa-
 ra o adresa ip din ether_arp cu o adresa ip a routerului. Pe cea de-a doua o fo-
 losesc ca sa scriu o adresa ip in ether_arp.
+
